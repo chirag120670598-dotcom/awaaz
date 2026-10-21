@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip pytest
+      - run: pytest tests/ -q
+      # The core must stay dependency-free. Fail the build if anything under
+      # awaaz/core imports a third-party package.
+      - name: core/ must be stdlib-only
+        run: |
+          python - <<'PY'
+          import ast, pathlib, sys
+          stdlib = set(sys.stdlib_module_names)
+          bad = []
+          for path in pathlib.Path("awaaz/core").rglob("*.py"):
+              tree = ast.parse(path.read_text(encoding="utf-8"))
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      for a in node.names:
+                          if a.name.split(".")[0] not in stdlib:
+                              bad.append(f"{path}: {a.name}")
+                  elif isinstance(node, ast.ImportFrom):
+                      if node.level == 0 and node.module and \
+                              node.module.split(".")[0] not in stdlib:
+                          bad.append(f"{path}: {node.module}")
+          if bad:
+              print("core/ must not import third-party packages:")
+              print("\n".join(bad)); sys.exit(1)
+          print("PASS: core/ stdlib-only")
+          PY
