@@ -6,40 +6,76 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # Pinned to 3.11 on purpose: sys.stdlib_module_names only exists on 3.10+,
+  # so running this inside the version matrix would crash on 3.9. The other
+  # four repos in this family use the same separate-job pattern.
+  dependency-free:
+    name: core is dependency-free
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Assert core/ imports only the standard library
+        run: |
+          python - <<'PY'
+          import ast, pathlib, sys
+
+          # Degrade instead of crashing if this is ever run on 3.9, where
+          # sys.stdlib_module_names does not exist.
+          stdlib = getattr(sys, "stdlib_module_names", None)
+          if stdlib is None:
+              print("SKIP: sys.stdlib_module_names needs Python 3.10+")
+              sys.exit(0)
+
+          bad = []
+          for path in sorted(pathlib.Path("awaaz/core").rglob("*.py")):
+              tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      names = [a.name for a in node.names]
+                  elif isinstance(node, ast.ImportFrom):
+                      if node.level:          # relative import: inside the package
+                          continue
+                      names = [node.module or ""]
+                  else:
+                      continue
+                  for name in names:
+                      root = name.split(".")[0]
+                      if root not in stdlib:
+                          bad.append(f"{path}:{node.lineno} imports {name!r}")
+
+          if bad:
+              print("core/ must stay dependency-free:")
+              for line in bad:
+                  print("  " + line)
+              sys.exit(1)
+          print("PASS: core/ imports only the standard library")
+          PY
+
+  test:
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.11", "3.13"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    name: ${{ matrix.python-version }} / ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip pytest
-      - run: pytest tests/ -q
-      # The core must stay dependency-free. Fail the build if anything under
-      # awaaz/core imports a third-party package.
-      - name: core/ must be stdlib-only
+      - name: Run tests
+        run: python -m pytest tests/ -p no:cacheprovider
+      - name: CLI smoke test
+        shell: bash
         run: |
-          python - <<'PY'
-          import ast, pathlib, sys
-          stdlib = set(sys.stdlib_module_names)
-          bad = []
-          for path in pathlib.Path("awaaz/core").rglob("*.py"):
-              tree = ast.parse(path.read_text(encoding="utf-8"))
-              for node in ast.walk(tree):
-                  if isinstance(node, ast.Import):
-                      for a in node.names:
-                          if a.name.split(".")[0] not in stdlib:
-                              bad.append(f"{path}: {a.name}")
-                  elif isinstance(node, ast.ImportFrom):
-                      if node.level == 0 and node.module and \
-                              node.module.split(".")[0] not in stdlib:
-                          bad.append(f"{path}: {node.module}")
-          if bad:
-              print("core/ must not import third-party packages:")
-              print("\n".join(bad)); sys.exit(1)
-          print("PASS: core/ stdlib-only")
-          PY
+          python -m awaaz.cli doctor
+          python -m awaaz.cli normalize "Aapka bill ₹1,234.50 hai, 15/08/2026 tak"
+          python -m awaaz.cli langs "Aaj ka episode AI tools ke baare mein hai"
+          python -m awaaz.cli script --file examples/voiceover.txt --numbers
+          python -m awaaz.cli translit "namaste shukriya dosto" --quiet
+          python -m awaaz.cli ssml --file examples/hinglish_script.txt
