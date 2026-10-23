@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import io
 import json
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import pytest
@@ -636,12 +636,37 @@ class TestCLI:
         assert "<" not in out
 
     def test_speak_without_engine(self, monkeypatch):
-        monkeypatch.setattr("awaaz.adapters.tts_adapter.available_engines",
-                            lambda: [])
-        buf = io.StringIO()
-        with redirect_stdout(buf):
+        """Must exit 2 with a helpful message, on any host.
+
+        Patch awaaz.cli.available_engines, not the adapter's. cli.py does
+        `from .adapters.tts_adapter import available_engines`, which binds the
+        name at import time — patching the adapter leaves cmd_speak looking at
+        the real function. On Linux that accidentally worked because no engine
+        was installed; on macOS `say` exists, the real lookup succeeded, and
+        the command fell through to a TTSError exit code 1 instead.
+        """
+        monkeypatch.setattr("awaaz.cli.available_engines", lambda: [])
+        # the guidance goes to stderr, not stdout — capture both
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
             code = main(["speak", "Namaste", "--out", "x.wav"])
         assert code == 2
+        assert "awaaz doctor" in err.getvalue()
+
+    def test_speak_reports_engine_failure_as_exit_1(self, monkeypatch):
+        """A present-but-failing engine is a different failure than a missing one."""
+        monkeypatch.setattr("awaaz.cli.available_engines",
+                            lambda: [ENGINES["espeak-ng"]])
+
+        def boom(*a, **kw):
+            raise TTSError("espeak-ng failed (exit 1): boom")
+
+        monkeypatch.setattr("awaaz.cli.synthesize", boom)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main(["speak", "Namaste", "--out", "x.wav"])
+        assert code == 1
+        assert "boom" in err.getvalue()
 
 
 class TestWindowsConsoleEncoding:
